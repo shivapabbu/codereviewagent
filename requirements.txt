@@ -1,0 +1,6 @@
+boto3>=1.34.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+rich>=13.7.0
+streamlit>=1.28.0
+PyGithub>=1.59.0
