@@ -8,6 +8,8 @@ import os
 import json
 import boto3
 import re
+import subprocess
+import glob
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
@@ -15,20 +17,64 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-load_dotenv()
+# Load .env file from the project root
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path, override=True)
+# Also try loading from current directory
+load_dotenv(override=False)
 
 console = Console()
 
+def sanitize_credential(value: Optional[str]) -> Optional[str]:
+    """Remove quotes and whitespace from credentials."""
+    if not value:
+        return None
+    # Remove surrounding quotes (single or double)
+    value = value.strip().strip('"').strip("'")
+    # Remove any remaining whitespace
+    value = value.strip()
+    return value if value else None
+
 # Initialize Bedrock client
 try:
-    bedrock = boto3.client(
-        "bedrock-runtime",
-        region_name=os.getenv("AWS_REGION", "us-east-1"),
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
-    )
+    # Try multiple environment variable names for compatibility
+    aws_region = sanitize_credential(os.getenv("AWS_REGION")) or sanitize_credential(os.getenv("AWS_DEFAULT_REGION")) or "us-east-1"
+    aws_key = sanitize_credential(os.getenv("AWS_ACCESS_KEY_ID")) or sanitize_credential(os.getenv("AWS_ACCESS_KEY"))
+    aws_secret = sanitize_credential(os.getenv("AWS_SECRET_ACCESS_KEY")) or sanitize_credential(os.getenv("AWS_SECRET_KEY"))
+    aws_session_token = sanitize_credential(os.getenv("AWS_SESSION_TOKEN")) or sanitize_credential(os.getenv("AWS_SECURITY_TOKEN"))
+    
+    # Check if using temporary credentials (ASIA prefix requires session token)
+    is_temporary_credential = aws_key and aws_key.startswith("ASIA")
+    
+    if is_temporary_credential and not aws_session_token:
+        console.print("[bold red]⚠️  Error: Temporary credentials detected (ASIA prefix) but AWS_SESSION_TOKEN is missing![/bold red]")
+        console.print("[dim]Temporary credentials require AWS_SESSION_TOKEN. Add it to your .env file or use permanent credentials (AKIA prefix)[/dim]")
+        bedrock = None
+    elif not aws_key or not aws_secret:
+        console.print("[bold yellow]⚠️  Warning: AWS credentials not found in environment variables[/bold yellow]")
+        console.print("[dim]Trying to use default AWS credential chain (AWS CLI, IAM roles, etc.)[/dim]")
+        # Try without explicit credentials (use default AWS credential chain)
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name=aws_region
+        )
+    else:
+        # Use explicit credentials
+        client_params = {
+            "service_name": "bedrock-runtime",
+            "region_name": aws_region,
+            "aws_access_key_id": aws_key,
+            "aws_secret_access_key": aws_secret
+        }
+        
+        # Add session token if present (for temporary credentials)
+        if aws_session_token:
+            client_params["aws_session_token"] = aws_session_token
+        
+        bedrock = boto3.client(**client_params)
 except Exception as e:
     console.print(f"[bold red]Error initializing Bedrock client: {e}[/bold red]")
+    console.print("[dim]Tip: Check your .env file format - credentials should not have quotes around them[/dim]")
     bedrock = None
 
 MODEL_ID = os.getenv("MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
@@ -90,6 +136,12 @@ Focus on:
 Return ONLY valid JSON, no additional text."""
 
     try:
+        if bedrock is None:
+            return {
+                "error": "Bedrock client not initialized. Please check your AWS credentials.",
+                "suggestions": []
+            }
+        
         # Use Claude 3 API format for Bedrock
         body = {
             "anthropic_version": "bedrock-2023-05-31",
@@ -146,9 +198,20 @@ Return ONLY valid JSON, no additional text."""
             }
             
     except Exception as e:
-        console.print(f"[bold red]Error calling Bedrock: {e}[/bold red]")
+        error_msg = str(e)
+        console.print(f"[bold red]Error calling Bedrock: {error_msg}[/bold red]")
+        
+        # Provide helpful error messages
+        if "UnrecognizedClientException" in error_msg or "invalid" in error_msg.lower():
+            error_msg += "\n\n💡 Troubleshooting tips:\n"
+            error_msg += "1. Check your AWS credentials in .env file\n"
+            error_msg += "2. Ensure credentials don't have quotes around them (e.g., use KEY=value not KEY='value')\n"
+            error_msg += "3. Verify credentials are valid and not expired\n"
+            error_msg += "4. Check that Bedrock is enabled in your AWS account\n"
+            error_msg += "5. Verify the AWS region is correct\n"
+        
         return {
-            "error": str(e),
+            "error": error_msg,
             "suggestions": []
         }
 
@@ -327,6 +390,262 @@ def apply_fix_to_file(file_path: str, issue: Dict) -> Tuple[bool, str]:
         return False, "No valid suggestion code found in issue"
     
     return apply_suggestion_to_file(file_path, line_number, suggestion_code)
+
+
+def get_git_diff(repo_path: str, base_ref: Optional[str] = None, head_ref: Optional[str] = None) -> str:
+    """
+    Get git diff for a repository.
+    
+    Args:
+        repo_path: Path to git repository
+        base_ref: Base branch/commit (default: HEAD)
+        head_ref: Head branch/commit (default: working directory)
+    
+    Returns:
+        Git diff as string
+    """
+    try:
+        os.chdir(repo_path)
+        
+        if base_ref and head_ref:
+            cmd = ['git', 'diff', base_ref, head_ref]
+        elif base_ref:
+            cmd = ['git', 'diff', base_ref]
+        else:
+            # Get unstaged changes
+            cmd = ['git', 'diff']
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        return f"Error getting git diff: {e.stderr}"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+def analyze_git_repo(repo_path: str, base_ref: Optional[str] = None, head_ref: Optional[str] = None) -> Dict:
+    """
+    Analyze a git repository by reviewing the diff.
+    
+    Args:
+        repo_path: Path to git repository
+        base_ref: Base branch/commit to compare against
+        head_ref: Head branch/commit
+    
+    Returns:
+        Dictionary containing review results
+    """
+    if not os.path.isdir(repo_path):
+        return {"error": f"Repository path not found: {repo_path}"}
+    
+    git_dir = Path(repo_path) / '.git'
+    if not git_dir.exists():
+        return {"error": f"Not a git repository: {repo_path}"}
+    
+    diff_content = get_git_diff(repo_path, base_ref, head_ref)
+    
+    if not diff_content.strip():
+        return {
+            "summary": "No changes detected in the specified range",
+            "issues": [],
+            "missing_docstrings": [],
+            "overall_score": 10,
+            "file_path": repo_path,
+            "git_info": {
+                "repo_path": repo_path,
+                "base_ref": base_ref or "HEAD",
+                "head_ref": head_ref or "working directory"
+            }
+        }
+    
+    # Analyze the diff
+    diff_description = f"Git diff from {base_ref or 'HEAD'} to {head_ref or 'working directory'}"
+    results = analyze_code(diff_content, diff_description)
+    results['file_path'] = repo_path
+    results['git_info'] = {
+        "repo_path": repo_path,
+        "base_ref": base_ref or "HEAD",
+        "head_ref": head_ref or "working directory",
+        "diff_length": len(diff_content)
+    }
+    
+    return results
+
+
+def get_code_files(directory: str, extensions: Optional[List[str]] = None) -> List[str]:
+    """
+    Get all code files in a directory.
+    
+    Args:
+        directory: Directory path to scan
+        extensions: List of file extensions to include (default: common code extensions)
+    
+    Returns:
+        List of file paths
+    """
+    if extensions is None:
+        extensions = ['.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.cpp', '.c', '.go', '.rs', '.php', '.rb']
+    
+    code_files = []
+    directory_path = Path(directory)
+    
+    if not directory_path.exists():
+        return code_files
+    
+    for ext in extensions:
+        pattern = f"**/*{ext}"
+        code_files.extend(directory_path.glob(pattern))
+    
+    # Filter out common directories to ignore
+    ignore_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', 'build', '.next'}
+    filtered_files = [
+        str(f) for f in code_files 
+        if not any(ignore_dir in str(f) for ignore_dir in ignore_dirs)
+    ]
+    
+    return sorted(filtered_files)
+
+
+def analyze_directory(directory: str, max_files: int = 50) -> Dict:
+    """
+    Analyze all code files in a directory.
+    
+    Args:
+        directory: Directory path to analyze
+        max_files: Maximum number of files to analyze (default: 50)
+    
+    Returns:
+        Dictionary containing aggregated review results
+    """
+    if not os.path.isdir(directory):
+        return {"error": f"Directory not found: {directory}"}
+    
+    code_files = get_code_files(directory)
+    
+    if not code_files:
+        return {
+            "summary": "No code files found in directory",
+            "issues": [],
+            "missing_docstrings": [],
+            "overall_score": 0,
+            "file_path": directory,
+            "files_analyzed": 0
+        }
+    
+    if len(code_files) > max_files:
+        code_files = code_files[:max_files]
+        console.print(f"[yellow]⚠️  Limiting analysis to first {max_files} files[/yellow]")
+    
+    all_issues = []
+    all_missing_docs = []
+    file_results = []
+    total_score = 0
+    analyzed_count = 0
+    
+    for file_path in code_files:
+        try:
+            console.print(f"[cyan]Analyzing: {file_path}[/cyan]")
+            result = analyze_file(file_path)
+            
+            if "error" not in result:
+                # Add file path to each issue
+                for issue in result.get('issues', []):
+                    issue['file_path'] = file_path
+                    all_issues.append(issue)
+                
+                for doc in result.get('missing_docstrings', []):
+                    doc['file_path'] = file_path
+                    all_missing_docs.append(doc)
+                
+                file_results.append({
+                    "file_path": file_path,
+                    "score": result.get('overall_score', 0),
+                    "issue_count": len(result.get('issues', [])),
+                    "missing_docs_count": len(result.get('missing_docstrings', []))
+                })
+                
+                total_score += result.get('overall_score', 0)
+                analyzed_count += 1
+        except Exception as e:
+            console.print(f"[red]Error analyzing {file_path}: {e}[/red]")
+            continue
+    
+    avg_score = total_score / analyzed_count if analyzed_count > 0 else 0
+    
+    return {
+        "summary": f"Analyzed {analyzed_count} files in {directory}. Found {len(all_issues)} total issues and {len(all_missing_docs)} missing docstrings.",
+        "issues": all_issues,
+        "missing_docstrings": all_missing_docs,
+        "overall_score": round(avg_score, 1),
+        "file_path": directory,
+        "files_analyzed": analyzed_count,
+        "total_files": len(code_files),
+        "file_results": file_results
+    }
+
+
+def analyze_multiple_files(file_paths: List[str]) -> Dict:
+    """
+    Analyze multiple files and return aggregated results.
+    
+    Args:
+        file_paths: List of file paths to analyze
+    
+    Returns:
+        Dictionary containing aggregated review results
+    """
+    if not file_paths:
+        return {"error": "No files provided"}
+    
+    all_issues = []
+    all_missing_docs = []
+    file_results = []
+    total_score = 0
+    analyzed_count = 0
+    
+    for file_path in file_paths:
+        if not os.path.exists(file_path):
+            console.print(f"[yellow]⚠️  File not found: {file_path}[/yellow]")
+            continue
+        
+        try:
+            console.print(f"[cyan]Analyzing: {file_path}[/cyan]")
+            result = analyze_file(file_path)
+            
+            if "error" not in result:
+                # Add file path to each issue
+                for issue in result.get('issues', []):
+                    issue['file_path'] = file_path
+                    all_issues.append(issue)
+                
+                for doc in result.get('missing_docstrings', []):
+                    doc['file_path'] = file_path
+                    all_missing_docs.append(doc)
+                
+                file_results.append({
+                    "file_path": file_path,
+                    "score": result.get('overall_score', 0),
+                    "issue_count": len(result.get('issues', [])),
+                    "missing_docs_count": len(result.get('missing_docstrings', []))
+                })
+                
+                total_score += result.get('overall_score', 0)
+                analyzed_count += 1
+        except Exception as e:
+            console.print(f"[red]Error analyzing {file_path}: {e}[/red]")
+            continue
+    
+    avg_score = total_score / analyzed_count if analyzed_count > 0 else 0
+    
+    return {
+        "summary": f"Analyzed {analyzed_count} files. Found {len(all_issues)} total issues and {len(all_missing_docs)} missing docstrings.",
+        "issues": all_issues,
+        "missing_docstrings": all_missing_docs,
+        "overall_score": round(avg_score, 1),
+        "file_path": "multiple files",
+        "files_analyzed": analyzed_count,
+        "file_results": file_results
+    }
 
 
 if __name__ == "__main__":

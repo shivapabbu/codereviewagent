@@ -15,8 +15,13 @@ from review_agent import (
     extract_suggestion_code
 )
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# Load .env file from the project root
+env_path = Path(__file__).parent / '.env'
+load_dotenv(dotenv_path=env_path, override=True)
+# Also try loading from current directory
+load_dotenv(override=False)
 
 # Page configuration
 st.set_page_config(
@@ -40,20 +45,78 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
+        def sanitize_credential(value):
+            """Remove quotes and whitespace from credentials."""
+            if not value:
+                return None
+            return value.strip().strip('"').strip("'").strip()
+        
         # Check AWS credentials
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
-        aws_key = os.getenv("AWS_ACCESS_KEY_ID")
-        aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_region = sanitize_credential(os.getenv("AWS_REGION")) or sanitize_credential(os.getenv("AWS_DEFAULT_REGION")) or "us-east-1"
+        aws_key = sanitize_credential(os.getenv("AWS_ACCESS_KEY_ID")) or sanitize_credential(os.getenv("AWS_ACCESS_KEY"))
+        aws_secret = sanitize_credential(os.getenv("AWS_SECRET_ACCESS_KEY")) or sanitize_credential(os.getenv("AWS_SECRET_KEY"))
+        aws_session_token = sanitize_credential(os.getenv("AWS_SESSION_TOKEN")) or sanitize_credential(os.getenv("AWS_SECURITY_TOKEN"))
         model_id = os.getenv("MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+        
+        # Check if using temporary credentials
+        is_temporary = aws_key and aws_key.startswith("ASIA")
+        
+        # Check if .env file exists
+        env_file_exists = env_path.exists()
+        
+        # Debug info (can be expanded)
+        with st.expander("🔧 Debug Info"):
+            st.write(f"**Env file path:** `{env_path}`")
+            st.write(f"**Env file exists:** {'✅ Yes' if env_file_exists else '❌ No'}")
+            st.write(f"**AWS_REGION:** `{aws_region}`")
+            st.write(f"**AWS_ACCESS_KEY_ID set:** {'✅ Yes' if aws_key else '❌ No'}")
+            st.write(f"**AWS_SECRET_ACCESS_KEY set:** {'✅ Yes' if aws_secret else '❌ No'}")
+            if aws_key:
+                key_preview = aws_key[:10] + "..." + aws_key[-4:] if len(aws_key) > 14 else aws_key[:10] + "..."
+                key_type = "🔵 Temporary (ASIA)" if is_temporary else "🟢 Permanent (AKIA)"
+                st.write(f"**Key preview:** `{key_preview}` ({key_type})")
+                if is_temporary:
+                    st.write(f"**AWS_SESSION_TOKEN set:** {'✅ Yes' if aws_session_token else '❌ No (REQUIRED for temporary credentials)'}")
+            if not env_file_exists:
+                st.warning("⚠️ .env file not found. Create one from .env.example")
         
         if not aws_key or not aws_secret:
             st.error("⚠️ AWS credentials not configured!")
-            st.info("Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in your .env file")
+            if not env_file_exists:
+                st.warning("⚠️ `.env` file not found in project directory!")
+                st.info(f"Expected location: `{env_path}`")
+            st.info("Please configure credentials in your `.env` file:")
+            
+            if is_temporary and not aws_session_token:
+                st.error("🔴 **Temporary credentials detected but AWS_SESSION_TOKEN is missing!**")
+                st.code("""
+# For TEMPORARY credentials (ASIA prefix):
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=ASIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_SESSION_TOKEN=...  # ← REQUIRED for temporary credentials!
+MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
+                """, language="bash")
+            else:
+                st.code("""
+# For PERMANENT credentials (AKIA prefix):
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
+
+# For TEMPORARY credentials (ASIA prefix), also add:
+AWS_SESSION_TOKEN=...
+                """, language="bash")
+            
+            st.warning("⚠️ **Important:** Do NOT use quotes around values in .env file!")
+            st.markdown("See [CREDENTIALS_TROUBLESHOOTING.md](CREDENTIALS_TROUBLESHOOTING.md) for help")
         else:
             st.success("✅ AWS credentials configured")
         
         st.info(f"**Region:** {aws_region}")
-        st.info(f"**Model:** {model_id.split('/')[-1] if '/' in model_id else model_id}")
+        model_display = model_id.split('/')[-1] if '/' in model_id else (model_id or "Not set")
+        st.info(f"**Model:** {model_display}")
         
         st.markdown("---")
         st.markdown("### 📚 How to use:")

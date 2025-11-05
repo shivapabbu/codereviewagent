@@ -1,6 +1,6 @@
 # 🔍 AWS Bedrock Code Review Agent
 
-A full-featured code review agent powered by AWS Bedrock and Claude 3, featuring both a CLI backend and a Streamlit web UI. Analyze code files or diffs, detect issues, get suggestions, and automatically apply fixes.
+A full-featured code review agent powered by AWS Bedrock and Claude 3, featuring a modern React/Next.js frontend dashboard and FastAPI backend. Analyze code files or diffs, detect issues, get suggestions, and automatically apply fixes.
 
 ## 🎯 Features
 
@@ -8,7 +8,8 @@ A full-featured code review agent powered by AWS Bedrock and Claude 3, featuring
 - **Issue Detection**: Identifies bugs, style issues, documentation gaps, performance problems, and security concerns
 - **Auto-Fix Suggestions**: Get code suggestions in GitHub-style format
 - **Apply Fixes**: One-click apply fixes directly to your code files
-- **Web UI**: Beautiful Streamlit interface for easy interaction
+- **Modern Web UI**: Beautiful React/Next.js dashboard with Tailwind CSS
+- **REST API**: FastAPI backend for easy integration
 - **CLI Tool**: Command-line interface for automation
 - **Results Storage**: Save review results as JSON files
 
@@ -17,18 +18,13 @@ A full-featured code review agent powered by AWS Bedrock and Claude 3, featuring
 1. **AWS Account** with Bedrock access enabled
    - Go to AWS Console → Bedrock → Model Access
    - Request access to Claude 3 Sonnet model
-2. **Python 3.8+**
-3. **AWS Credentials** (Access Key ID and Secret Access Key)
+2. **Python 3.8+** (for backend)
+3. **Node.js 18+** (for frontend)
+4. **AWS Credentials** (Access Key ID and Secret Access Key)
 
 ## 🚀 Quick Start
 
-### 1. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Set Up Environment Variables
+### 1. Set Up Environment Variables
 
 Create a `.env` file in the project root:
 
@@ -36,20 +32,36 @@ Create a `.env` file in the project root:
 AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+# For temporary credentials (ASIA prefix), also add:
+# AWS_SESSION_TOKEN=your_session_token
 MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
 ```
 
 **Note**: Make sure `.env` is in your `.gitignore` to keep credentials secure!
 
-### 3. Run the Web UI
+### 2. Start the Application
+
+**Option A: Start both servers together (Recommended)**
 
 ```bash
-streamlit run app.py
+./start.sh
 ```
 
-The UI will open in your browser at `http://localhost:8501`
+**Option B: Start servers separately**
 
-### 4. Or Use the CLI
+```bash
+# Terminal 1: Start backend
+./start_backend.sh
+
+# Terminal 2: Start frontend
+./start_frontend.sh
+```
+
+The frontend will open in your browser at `http://localhost:3000`
+The backend API will be available at `http://localhost:8000`
+API documentation at `http://localhost:8000/docs`
+
+### 3. Or Use the CLI
 
 ```bash
 python review_agent.py
@@ -59,16 +71,30 @@ Then enter the path to your file or diff when prompted.
 
 ## 📖 Usage
 
-### Web UI (Streamlit)
+### Web UI (Next.js Dashboard)
 
-1. **Upload a File**: Use the "File Upload" tab to upload a code file or diff
+1. **Upload a File**: Use the "File Upload" tab to upload a code file or diff (drag & drop supported)
 2. **Paste Code**: Use the "Code Input" tab to paste code directly
-3. **View Results**: Check the "Review Results" tab for:
+3. **View Results**: The dashboard shows:
    - Summary and overall score
-   - Detailed issues with severity levels
-   - Missing docstrings
+   - Detailed issues with severity levels (High/Medium/Low)
+   - Missing docstrings with suggestions
    - Apply fixes with one click
+   - Syntax-highlighted code suggestions
 4. **Download Results**: Download review results as JSON
+
+### REST API
+
+The backend exposes a REST API at `http://localhost:8000`:
+
+- `POST /api/review/code` - Review code from text
+- `POST /api/review/file` - Review uploaded file
+- `POST /api/review/file-path` - Review file from server path
+- `POST /api/fix/apply` - Apply a fix to a file
+- `GET /api/results` - Get recent review results
+- `GET /docs` - Interactive API documentation
+
+See `http://localhost:8000/docs` for full API documentation.
 
 ### CLI Tool
 
@@ -103,13 +129,58 @@ python review_agent.py
 
 ```
 codereviewagent/
-├── review_agent.py      # Backend CLI tool
-├── app.py               # Streamlit web UI
-├── requirements.txt     # Python dependencies
+├── backend/
+│   ├── main.py          # FastAPI backend server
+│   └── requirements.txt # Backend Python dependencies
+├── frontend/
+│   ├── app/             # Next.js app directory
+│   │   ├── components/  # React components
+│   │   ├── lib/         # API client utilities
+│   │   └── page.tsx     # Main dashboard page
+│   ├── package.json     # Frontend dependencies
+│   └── tailwind.config.js
+├── review_agent.py      # Backend CLI tool (core logic)
+├── requirements.txt     # Python dependencies (shared)
 ├── .env                 # Environment variables (create this)
 ├── .env.example         # Example env file
 ├── results/             # Review results storage
+├── start.sh             # Start both servers
+├── start_backend.sh     # Start backend only
+├── start_frontend.sh    # Start frontend only
 └── README.md            # This file
+```
+
+## 🔧 Development Setup
+
+### Backend Setup
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install backend dependencies
+pip install -r backend/requirements.txt
+pip install -r requirements.txt
+```
+
+### Frontend Setup
+
+```bash
+cd frontend
+npm install
+```
+
+### Running in Development
+
+```bash
+# Backend (with auto-reload)
+cd backend
+uvicorn main:app --reload
+
+# Frontend (with hot reload)
+cd frontend
+npm run dev
 ```
 
 ## 🔧 Configuration
